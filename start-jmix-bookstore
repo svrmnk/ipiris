@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# Проверка версии Bash
+if [[ "${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}" -lt 52 ]]; then
+    echo "Ошибка: Требуется Bash версии 5.2 или выше."
+    exit 1
+fi
+
+# Настройки
+YC_CLOUD_ID="<ваш_cloud_id>"
+YC_FOLDER_ID="<ваш_folder_id>"
+VM_NAME="jmix-bookstore-vm"
+NETWORK_NAME="bookstore-network"
+SUBNET_NAME="bookstore-subnet"
+ZONE="ru-central1-a"
+IMAGE_FAMILY="ubuntu-2404-lts"
+SSH_KEY_PATH="$HOME/.ssh/bookstore_key"
+SSH_PUB_KEY_PATH="${SSH_KEY_PATH}.pub"
+
+# Проверка установки Yandex Cloud CLI
+if ! command -v yc &>/dev/null; then
+    echo "Ошибка: Yandex Cloud CLI (yc) не установлен."
+    exit 1
+fi
+
+# Аутентификация в Yandex Cloud
+yc config set cloud-id "$YC_CLOUD_ID"
+yc config set folder-id "$YC_FOLDER_ID"
+
+# Создание SSH-ключей
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+    ssh-keygen -t rsa -b 2048 -f "$SSH_KEY_PATH" -N "" -q
+    echo "SSH-ключи созданы: $SSH_PUB_KEY_PATH"
+fi
+
+# Создание сети
+yc vpc network create --name "$NETWORK_NAME" --description "Облачная сеть для jmix-bookstore"
+
+# Создание подсети
+yc vpc subnet create --name "$SUBNET_NAME" \
+    --zone "$ZONE" \
+    --range "192.168.10.0/24" \
+    --network-name "$NETWORK_NAME"
+
+# Создание виртуальной машины
+VM_ID=$(yc compute instance create \
+    --name "$VM_NAME" \
+    --zone "$ZONE" \
+    --platform "intel-ice-lake" \
+    --cores 2 \
+    --memory 4GB \
+    --create-boot-disk image-family="$IMAGE_FAMILY",size=20GB \
+    --network-interface subnet-name="$SUBNET_NAME",nat-ip-version=ipv4 \
+    --ssh-key "$(cat $SSH_PUB_KEY_PATH)" \
+    --format json | jq -r '.id')
+
+echo "Создана ВМ с ID: $VM_ID"
+
+# Получение внешнего IP ВМ
+VM_IP=$(yc compute instance get --id "$VM_ID" --format json | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+
+echo "Внешний IP сервера: $VM_IP"
+
+# Ожидание запуска ВМ
+echo "Ожидание запуска ВМ..."
+sleep 30
+
+# Подключение и установка Docker
+ssh -o StrictHostKeyChecking=no -i "$SSH_KEY_PATH" "ipiris@$VM_IP" <<EOF
+    sudo apt update
+    sudo apt install -y docker.io
+    sudo systemctl enable --now docker
+    sudo docker run -d -p 8080:8080 jmix/jmix-bookstore
+EOF
+
+echo "Docker-контейнер запущен!"
+
+# Вывод данных подключения
+echo "Подключение к серверу: ssh -i $SSH_KEY_PATH ipiris@$VM_IP"
+echo "Открытие веб-приложения: http://$VM_IP:8080"
+
+exit 0
+
